@@ -142,8 +142,6 @@ if cuda:
     adversarial_loss_mse.cuda()
     adversarial_loss_heu.cuda()
 
-
-
 # Initialize weights
 generator.apply(weights_init_normal)
 discriminator.apply(weights_init_normal)
@@ -164,7 +162,7 @@ dataloader = torch.utils.data.DataLoader(
 )
 
 # Optimizers
-optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+# optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 
 Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
@@ -176,8 +174,11 @@ Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 for epoch in range(opt.n_epochs):
     
     generators = [copy.deepcopy(generator), copy.deepcopy(generator), copy.deepcopy(generator)]
-    q_fitnesses = [0, 0, 0]
-    d_fitnesses = [0, 0, 0]
+    optimizers_G = [torch.optim.Adam(generators[0].parameters(), lr=opt.lr, betas=(opt.b1, opt.b2)),
+                    torch.optim.Adam(generators[1].parameters(), lr=opt.lr, betas=(opt.b1, opt.b2)),
+                    torch.optim.Adam(generators[2].parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))]
+    q_fitnesses = [0.0, 0.0, 0.0]
+    d_fitnesses = [0.0, 0.0, 0.0]
     for i, (imgs, _) in enumerate(dataloader):
 
         # Adversarial ground truths
@@ -191,7 +192,7 @@ for epoch in range(opt.n_epochs):
         #  Train Generator
         # -----------------
 
-        optimizer_G.zero_grad() # TODO: Does this need to be cloned as well?
+        # optimizer_G.zero_grad() 
 
         # Sample noise as generator input
         z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], opt.latent_dim))))
@@ -199,6 +200,8 @@ for epoch in range(opt.n_epochs):
         gen_imgs = []
         g_loss = []
         for g in range(3):
+
+            optimizers_G[g].zero_grad()
 
             # Generate a batch of images
             gen_imgs[g] = generators[g](z)
@@ -213,10 +216,10 @@ for epoch in range(opt.n_epochs):
             # Loss measures generator's ability to fool the discriminator
             d_gz = discriminator(gen_imgs[g])
             g_loss[g] = adversarial_loss(d_gz, valid)
-            q_fitnesses[g] += quality_fitness(d_gz, valid) # TODO: Prabobly wouldn't work since return type is not number
+            # q_fitnesses[g] += quality_fitness(d_gz, valid).item()
 
             g_loss[g].backward()
-            optimizer_G.step() # TODO: Does this need to be cloned as well?
+            optimizers_G[g].step() 
 
             # ---------------------
             #  Train Discriminator
@@ -230,10 +233,23 @@ for epoch in range(opt.n_epochs):
             fake_loss = adversarial_loss_bce(discriminator(gen_imgs[g].detach()), fake)
             d_loss = (real_loss + fake_loss) / 2
 
-            d_fitnesses[g] += diversity_fitness(d_gz, d_x) # TODO: Prabobly wouldn't work since return type is not number
+            # d_fitnesses[g] += diversity_fitness(d_gz, d_x).item()
 
             d_loss.backward()
             optimizer_D.step()
+
+            q_fitnesses[g] = nn.functional.sigmoid(d_gz).data.mean().cpu().numpy()
+
+            # Diversity fitness score
+            eval_D = real_loss + fake_loss
+            gradients = torch.autograd.grad(outputs=eval_D, inputs=discriminator.parameters(),
+                                            grad_outputs=torch.ones(eval_D.size()).cuda(),
+                                            create_graph=True, retain_graph=True, only_inputs=True)
+            with torch.no_grad():
+                for i, grad in enumerate(gradients):
+                    grad = grad.view(-1)
+                    allgrad = grad if i == 0 else torch.cat([allgrad,grad]) 
+            d_fitnesses[g] = -torch.log(torch.norm(allgrad)).data.cpu().numpy()
 
         print(
             "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G0 loss: %f] [G1 loss: %f] [G2 loss: %f]"
@@ -243,3 +259,6 @@ for epoch in range(opt.n_epochs):
         batches_done = epoch * len(dataloader) + i
         if batches_done % opt.sample_interval == 0:
             save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+    fitness = q_fitnesses + d_fitnesses
+    max_index = fitness.index(max(fitness))
+    generator = generators[max_index]
