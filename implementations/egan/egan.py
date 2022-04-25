@@ -170,7 +170,7 @@ Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 # ----------
 #  Training
 # ----------
-
+batches_done = 0
 for epoch in range(opt.n_epochs):
     
     generators = [copy.deepcopy(generator), copy.deepcopy(generator), copy.deepcopy(generator)]
@@ -197,8 +197,8 @@ for epoch in range(opt.n_epochs):
         # Sample noise as generator input
         z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], opt.latent_dim))))
 
-        gen_imgs = []
-        g_loss = []
+        gen_imgs = [None] * 3
+        g_loss = [None] * 3
         for g in range(3):
 
             optimizers_G[g].zero_grad()
@@ -238,27 +238,54 @@ for epoch in range(opt.n_epochs):
             d_loss.backward()
             optimizer_D.step()
 
-            q_fitnesses[g] = nn.functional.sigmoid(d_gz).data.mean().cpu().numpy()
-
-            # Diversity fitness score
-            eval_D = real_loss + fake_loss
-            gradients = torch.autograd.grad(outputs=eval_D, inputs=discriminator.parameters(),
-                                            grad_outputs=torch.ones(eval_D.size()).cuda(),
-                                            create_graph=True, retain_graph=True, only_inputs=True)
-            with torch.no_grad():
-                for i, grad in enumerate(gradients):
-                    grad = grad.view(-1)
-                    allgrad = grad if i == 0 else torch.cat([allgrad,grad]) 
-            d_fitnesses[g] = -torch.log(torch.norm(allgrad)).data.cpu().numpy()
+            
 
         print(
             "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G0 loss: %f] [G1 loss: %f] [G2 loss: %f]"
             % (epoch, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss[0].item(), g_loss[1].item(), g_loss[2].item())
         )
+    # Evaluation
+    gen_imgs = [None] * 3
+    g_loss = [None] * 3
+    for g in range(3):
+        # Generate a batch of images
+        gen_imgs[g] = generators[g](z)
 
-        batches_done = epoch * len(dataloader) + i
-        if batches_done % opt.sample_interval == 0:
-            save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+        # Loss measures generator's ability to fool the discriminator
+        d_gz = discriminator(gen_imgs[g])
+
+        # Measure discriminator's ability to classify real from generated samples
+        d_x = discriminator(real_imgs)
+        real_loss = adversarial_loss_bce(d_x, valid)
+        fake_loss = adversarial_loss_bce(discriminator(gen_imgs[g].detach()), fake)
+
+        # Quality fitness score
+        q_fitnesses[g] = torch.sigmoid(d_gz).data.mean().cpu().numpy()
+
+        # Diversity fitness score
+        eval_D = real_loss + fake_loss
+        gradients = torch.autograd.grad(outputs=eval_D, inputs=discriminator.parameters(),
+                                        grad_outputs=torch.ones(eval_D.size()).cuda(),
+                                        create_graph=True, retain_graph=True, only_inputs=True)
+        with torch.no_grad():
+            for i, grad in enumerate(gradients):
+                grad = grad.view(-1)
+                allgrad = grad if i == 0 else torch.cat([allgrad,grad]) 
+        d_fitnesses[g] = -torch.log(torch.norm(allgrad)).data.cpu().numpy() * 0.01
     fitness = q_fitnesses + d_fitnesses
     max_index = fitness.index(max(fitness))
     generator = generators[max_index]
+    print()
+    print(
+            "[Epoch %d/%d] [G0: %f = %f + %f] [G1: %f = %f + %f] [G2: %f = %f + %f]"
+            % (epoch, opt.n_epochs, fitness[0], q_fitnesses[0], d_fitnesses[0], fitness[1], q_fitnesses[1], d_fitnesses[1], fitness[2], q_fitnesses[2], d_fitnesses[2])
+        )
+    print()
+
+    #Save images
+    batches_done += len(dataloader)
+    if batches_done >= opt.sample_interval:
+        batches_done -= opt.sample_interval
+        z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], opt.latent_dim))))
+        gen_imgs = generator(z)
+        save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
